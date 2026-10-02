@@ -52,3 +52,4 @@ For passwordless SSH, install the matching **public** key in `~ec2-user/.ssh/aut
 
     0 2 1 * * cd /home/ec2-user/ansible-monthly-patching && ansible-playbook -i inventory monthly-patching.yml >> patching.log 2>&1
 # monthly-patch-ansible
+# monthly-patch-ansible
