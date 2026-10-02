@@ -1,0 +1,3 @@
+[servers]
+server1 ansible_host=54.160.218.12 ansible_user=ec2-user
+server2 ansible_host=54.89.192.41 ansible_user=ec2-user

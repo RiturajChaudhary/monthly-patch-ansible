@@ -1,0 +1,7 @@
+---
+ansible_user: ec2-user
+ansible_become: true
+
+important_service: sshd
+disk_limit_percent: 90
+reboot_timeout: 600

@@ -1,0 +1,170 @@
+---
+- name: Monthly Ubuntu and Amazon Linux server patching
+  hosts: servers
+  become: true
+  gather_facts: true
+
+  tasks:
+    # ------------------------------------------------------------
+    # 1. PRE-CHECK
+    # ------------------------------------------------------------
+    - name: Pre-check - server connectivity
+      ansible.builtin.ping:
+
+    - name: Pre-check - disk usage of /
+      ansible.builtin.command: df --output=pcent /
+      register: disk_before
+      changed_when: false
+      check_mode: false
+
+    - name: Pre-check - save disk usage as a number
+      ansible.builtin.set_fact:
+        disk_before_percent: "{{ disk_before.stdout_lines[1] | trim | replace('%', '') | int }}"
+
+    - name: Pre-check - stop if disk is too full
+      ansible.builtin.fail:
+        msg: "Disk is {{ disk_before_percent }}% full (limit {{ disk_limit_percent }}%). Free space first."
+      when: disk_before_percent | int >= disk_limit_percent | int
+
+    - name: Pre-check - current kernel version
+      ansible.builtin.command: uname -r
+      register: kernel_before
+      changed_when: false
+      check_mode: false
+
+    - name: Pre-check - important service status
+      ansible.builtin.command: systemctl is-active {{ important_service }}
+      register: service_before
+      changed_when: false
+      check_mode: false
+      failed_when: false
+
+    - name: Pre-check - show results
+      ansible.builtin.debug:
+        msg:
+          - "Disk usage : {{ disk_before_percent }}%"
+          - "Kernel     : {{ kernel_before.stdout }}"
+          - "Service {{ important_service }} : {{ service_before.stdout }}"
+
+    # ------------------------------------------------------------
+    # 2. PATCH
+    # ------------------------------------------------------------
+    - name: Patch - verify supported operating system
+      ansible.builtin.fail:
+        msg: "Unsupported distribution: {{ ansible_distribution }} {{ ansible_distribution_version }}. Supported distributions are Ubuntu and Amazon Linux 2/2023."
+      when: ansible_distribution not in ['Ubuntu', 'Amazon']
+
+    - name: Patch - update Ubuntu packages
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+        lock_timeout: 120
+      register: ubuntu_patch_result
+      ignore_errors: true
+      when: ansible_distribution == 'Ubuntu'
+
+    - name: Patch - update Amazon Linux 2 packages
+      ansible.builtin.yum:
+        name: '*'
+        state: latest
+        update_cache: true
+      register: amazon_linux_2_patch_result
+      ignore_errors: true
+      when:
+        - ansible_distribution == 'Amazon'
+        - ansible_distribution_major_version == '2'
+
+    - name: Patch - update Amazon Linux 2023 packages
+      ansible.builtin.dnf:
+        name: '*'
+        state: latest
+        update_cache: true
+      register: amazon_linux_2023_patch_result
+      ignore_errors: true
+      when:
+        - ansible_distribution == 'Amazon'
+        - ansible_distribution_major_version == '2023'
+
+    - name: Patch - reject unsupported Amazon Linux versions
+      ansible.builtin.fail:
+        msg: "Unsupported Amazon Linux version: {{ ansible_distribution_version }}. Supported versions are 2 and 2023."
+      when:
+        - ansible_distribution == 'Amazon'
+        - ansible_distribution_major_version not in ['2', '2023']
+
+    - name: Patch - select package update result
+      ansible.builtin.set_fact:
+        patch_result: "{{ ubuntu_patch_result if ansible_distribution == 'Ubuntu' else (amazon_linux_2_patch_result if ansible_distribution_major_version == '2' else amazon_linux_2023_patch_result) }}"
+
+    # ------------------------------------------------------------
+    # 3. REBOOT (only when required)
+    # ------------------------------------------------------------
+    - name: Reboot - check if the server needs a reboot
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_file
+      when: ansible_distribution == 'Ubuntu'
+
+    - name: Reboot - determine whether Amazon Linux needs a reboot
+      ansible.builtin.set_fact:
+        reboot_needed: "{{ patch_result.changed | default(false) }}"
+      when: ansible_distribution == 'Amazon'
+
+    - name: Reboot - determine whether Ubuntu needs a reboot
+      ansible.builtin.set_fact:
+        reboot_needed: "{{ reboot_file.stat.exists }}"
+      when: ansible_distribution == 'Ubuntu'
+
+    - name: Reboot - reboot and wait for the server to come back
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ reboot_timeout }}"
+      when:
+        - patch_result is succeeded
+        - reboot_needed | bool
+      register: reboot_result
+
+    # ------------------------------------------------------------
+    # 4. POST-CHECK
+    # ------------------------------------------------------------
+    - name: Post-check - server is reachable
+      ansible.builtin.ping:
+
+    - name: Post-check - make sure the important service is running
+      ansible.builtin.service:
+        name: "{{ important_service }}"
+        state: started
+      register: service_after
+      ignore_errors: true
+
+    - name: Post-check - kernel version
+      ansible.builtin.command: uname -r
+      register: kernel_after
+      changed_when: false
+      check_mode: false
+
+    - name: Post-check - disk usage of /
+      ansible.builtin.command: df --output=pcent /
+      register: disk_after
+      changed_when: false
+      check_mode: false
+
+    - name: Post-check - save disk usage as a number
+      ansible.builtin.set_fact:
+        disk_after_percent: "{{ disk_after.stdout_lines[1] | trim | replace('%', '') | int }}"
+
+    # ------------------------------------------------------------
+    # 5. REPORT
+    # ------------------------------------------------------------
+    - name: Report - decide results
+      ansible.builtin.set_fact:
+        report_patching: "{{ 'SUCCESS' if patch_result is succeeded else 'FAILED' }}"
+        report_reboot: "{{ 'YES' if (reboot_result is defined and reboot_result is changed) else 'NO' }}"
+        report_health: "{{ 'PASS' if (service_after is succeeded and disk_after_percent | int < disk_limit_percent | int) else 'FAIL' }}"
+
+    - name: Report - show summary
+      ansible.builtin.debug:
+        msg:
+          - "Server: {{ inventory_hostname }}"
+          - "Patching: {{ report_patching }}"
+          - "Reboot: {{ report_reboot }}"
+          - "Health Check: {{ report_health }}"
